@@ -1,7 +1,8 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use bitcoin::consensus::{serialize, Decodable};
 use bitcoin::network::Magic;
 use bitcoin::Transaction;
+use bitcoincore_rpc::RpcApi;
 use clap::Parser;
 use hex_string::HexString;
 use nostr::prelude::*;
@@ -9,16 +10,32 @@ use nostr::Keys;
 use nostr_sdk::relay::pool::RelayPoolNotification::*;
 use nostr_sdk::Client;
 use std::str::FromStr;
+extern crate pretty_env_logger;
+
 
 #[derive(Parser)]
 #[command()]
 struct Args {
+    #[clap(default_value_t = Network::Bitcoin, short, long)]
+    network: Network,
+
     #[arg(short, long)]
     relays: Vec<String>,
+
+    #[arg(long)]
+    bitcoin_host: Option<String>,
+
+    #[arg(long)]
+    bitcoin_user: Option<String>,
+
+    #[arg(long)]
+    bitcoin_password: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    pretty_env_logger::init();
+    
     let args = Args::parse();
 
     let my_keys = Keys::generate();
@@ -41,6 +58,17 @@ async fn main() -> anyhow::Result<()> {
 
     client.subscribe(vec![subscription]).await;
 
+    println!("Connecting bitcoin core...");
+    let rpc = bitcoincore_rpc::Client::new(
+        &args.bitcoin_host.unwrap(),
+        bitcoincore_rpc::Auth::UserPass(args.bitcoin_user.unwrap(), args.bitcoin_password.unwrap()),
+    )
+    .unwrap();
+
+    let version = rpc.get_network_info().unwrap().subversion;
+
+    println!("Connected to bitcoin core version {}", version);
+
     println!("Listening for bitcoin txs...");
     client
         .handle_notifications(|notification| async {
@@ -60,6 +88,16 @@ async fn main() -> anyhow::Result<()> {
                             }
                         });
 
+                    match magic {
+                        Some(magic) => {
+                            if magic != args.network.magic() {
+                                return Ok(());
+                            }
+                        }
+
+                        None => return Ok(()),
+                    }
+
                     // get transactions
                     let txs: Vec<Transaction> = event
                         .tags
@@ -78,15 +116,8 @@ async fn main() -> anyhow::Result<()> {
                             }
                         }).unwrap_or_default();
 
-                    match magic {
-                        Some(magic) => {
-                            if let Err(e) = broadcast_txs(txs, magic).await {
-                                println!("Error broadcasting txs: {e}");
-                            }
-                        }
-                        None => {
-                            println!("Network: unknown");
-                        }
+                    if let Err(e) = broadcast_txs(&rpc, txs).await {
+                        println!("Error broadcasting txs: {e}");
                     }
                 }
             }
@@ -96,36 +127,41 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn broadcast_txs(txs: Vec<Transaction>, magic: Magic) -> anyhow::Result<()> {
-    if txs.is_empty() {
-        return Ok(());
+async fn broadcast_txs(rpc: &bitcoincore_rpc::Client, txs: Vec<Transaction>) -> anyhow::Result<()> {
+    match txs.len() {
+        0 => return Ok(()),
+        1 => {
+            // Use send_raw_transaction for single txs, because submitpackage
+            // doesn't support them.
+            for tx in &txs {
+                let result = rpc.send_raw_transaction(tx);
+        
+                if let Err(e) = result {
+                    println!("Error broadcasting tx: {}", e);
+        
+                    continue;
+                }
+        
+                println!("Broadcasted tx: {}", tx.txid());
+            }
+        },
+        _ => {
+            let tx_refs: Vec<&Transaction> = txs.iter().collect();
+
+            let result = rpc.submit_package(&tx_refs);
+            if let Err(e) = result {
+                bail!("Error submitting package: {}", e);
+            }
+        
+            println!("{:?}", result);
+        }
     }
 
-    let client = reqwest::Client::builder().build()?;
+    let txids: Vec<String> = txs.iter().
+        map(|tx| tx.txid().to_string()).
+        collect();
 
-    let mutinynet = Magic::from_bytes([0xA5, 0xDF, 0x2D, 0xCB]);
-
-    let url = match magic {
-        Magic::BITCOIN => Ok("https://mempool.space/api/tx"),
-        Magic::TESTNET => Ok("https://mempool.space/testnet/api/tx"),
-        Magic::SIGNET => Ok("https://mempool.space/signet/api/tx"),
-        magic if magic == mutinynet => Ok("https://mutinynet.com/api/tx"),
-        magic => Err(anyhow!("Magic: {magic} is unknown")),
-    }?;
-
-    for tx in txs {
-        let bytes = serialize(&tx);
-        let body = HexString::from_bytes(&bytes).as_string();
-
-        client
-            .post(url)
-            .body(body)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        println!("Broadcasted tx: {}", tx.txid());
-    }
+    println!("Submitted transactions: {}", txids.join(","));
 
     Ok(())
 }
