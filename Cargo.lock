@@ -173,6 +173,7 @@ dependencies = [
 [[package]]
 name = "bitcoincore-rpc"
 version = "0.17.0"
+source = "git+https://github.com/joostjager/rust-bitcoincore-rpc.git?rev=e28f58bb458d32db504a2cace07cc97b355593d3#e28f58bb458d32db504a2cace07cc97b355593d3"
 dependencies = [
  "bitcoin-private",
  "bitcoincore-rpc-json",
@@ -185,6 +186,7 @@ dependencies = [
 [[package]]
 name = "bitcoincore-rpc-json"
 version = "0.17.0"
+source = "git+https://github.com/joostjager/rust-bitcoincore-rpc.git?rev=e28f58bb458d32db504a2cace07cc97b355593d3#e28f58bb458d32db504a2cace07cc97b355593d3"
 dependencies = [
  "bitcoin",
  "bitcoin-private",
